@@ -21,16 +21,43 @@
 #include <chrono>
 #include <thread>
 
-#include <folly/ConstexprMath.h>
-#include <folly/Likely.h>
-#include <folly/Optional.h>
-#include <folly/concurrency/CacheLocality.h>
+#include <boost/optional.hpp>
+
+#include "mongo/platform/compiler.h"
+#include "mongo/util/assert_util.h"
 
 namespace folly {
 
+  /**
+ * constexpr_min and constexpr_max are pasted here from folly/ConstexprMath.h to avoid adding more
+ * folly dependencies.
+ */
+
+// When a and b are equivalent objects, we return a to make sorting stable.
+template <typename T, typename... Ts>
+constexpr T constexpr_min(T a, Ts... ts) {
+    T list[] = {ts..., a};  // 0-length arrays are illegal
+    for (auto i = 0u; i < sizeof...(Ts); ++i) {
+        a = list[i] < a ? list[i] : a;
+    }
+    return a;
+}
+
+// TLDR: Prefer using operator< for ordering. And when a and b are equivalent objects, we return b
+// to make sorting stable.
+// See http://stepanovpapers.com/notes.pdf for details.
+template <typename T, typename... Ts>
+constexpr T constexpr_max(T a, Ts... ts) {
+    T list[] = {ts..., a};  // 0-length arrays are illegal
+    for (auto i = 0u; i < sizeof...(Ts); ++i) {
+        a = list[i] < a ? a : list[i];
+    }
+    return a;
+}
+
 struct TokenBucketPolicyDefault {
   using align =
-      std::integral_constant<size_t, hardware_destructive_interference_size>;
+      std::integral_constant<size_t, std::hardware_destructive_interference_size>;
 
   template <typename T>
   using atom = std::atomic<T>;
@@ -114,8 +141,8 @@ class TokenBucketStorage {
    */
   double balance(
       double rate, double burstSize, double nowInSeconds) const noexcept {
-    assert(rate > 0);
-    assert(burstSize > 0);
+    invariant(rate > 0);
+    invariant(burstSize > 0);
     double zt = this->zeroTime_.load(std::memory_order_relaxed);
     return std::min((nowInSeconds - zt) * rate, burstSize);
   }
@@ -136,8 +163,8 @@ class TokenBucketStorage {
       double burstSize,
       double nowInSeconds,
       const Callback& callback) {
-    assert(rate > 0);
-    assert(burstSize > 0);
+    invariant(rate > 0);
+    invariant(burstSize > 0);
 
     double zeroTimeOld;
     double zeroTimeNew;
@@ -152,7 +179,7 @@ class TokenBucketStorage {
       }
 
       zeroTimeNew = nowInSeconds - tokensNew / rate;
-    } while (FOLLY_UNLIKELY(
+    } while (MONGO_unlikely(
         !compare_exchange_weak_relaxed(zeroTime_, zeroTimeOld, zeroTimeNew)));
 
     return consumed;
@@ -181,7 +208,7 @@ class TokenBucketStorage {
    * Thread-safe.
    */
   void returnTokens(double tokensToReturn, double rate) {
-    assert(rate > 0);
+    invariant(rate > 0);
 
     returnTokensImpl(tokensToReturn, rate);
   }
@@ -199,7 +226,7 @@ class TokenBucketStorage {
     do {
       zeroTimeNew = zeroTimeOld - tokenCount / rate;
 
-    } while (FOLLY_UNLIKELY(
+    } while (MONGO_unlikely(
         !compare_exchange_weak_relaxed(zeroTime_, zeroTimeOld, zeroTimeNew)));
     return zeroTimeNew;
   }
@@ -322,8 +349,8 @@ class BasicDynamicTokenBucket {
       double rate,
       double burstSize,
       double nowInSeconds = defaultClockNow()) {
-    assert(rate > 0);
-    assert(burstSize > 0);
+    invariant(rate > 0);
+    invariant(burstSize > 0);
 
     if (bucket_.balance(rate, burstSize, nowInSeconds) < 0.0) {
       return 0;
@@ -334,7 +361,7 @@ class BasicDynamicTokenBucket {
           return available < toConsume ? 0.0 : toConsume;
         });
 
-    assert(consumed == toConsume || consumed == 0.0);
+    invariant(consumed == toConsume || consumed == 0.0);
     return consumed == toConsume;
   }
 
@@ -358,8 +385,8 @@ class BasicDynamicTokenBucket {
       double rate,
       double burstSize,
       double nowInSeconds = defaultClockNow()) {
-    assert(rate > 0);
-    assert(burstSize > 0);
+    invariant(rate > 0);
+    invariant(burstSize > 0);
 
     if (bucket_.balance(rate, burstSize, nowInSeconds) <= 0.0) {
       return 0;
@@ -378,8 +405,8 @@ class BasicDynamicTokenBucket {
    * Thread-safe.
    */
   void returnTokens(double tokensToReturn, double rate) {
-    assert(rate > 0);
-    assert(tokensToReturn > 0);
+    invariant(rate > 0);
+    invariant(tokensToReturn > 0);
 
     bucket_.returnTokens(tokensToReturn, rate);
   }
@@ -404,16 +431,16 @@ class BasicDynamicTokenBucket {
    *
    * Thread-safe.
    */
-  Optional<double> consumeWithBorrowNonBlocking(
+  boost::optional<double> consumeWithBorrowNonBlocking(
       double toConsume,
       double rate,
       double burstSize,
       double nowInSeconds = defaultClockNow()) {
-    assert(rate > 0);
-    assert(burstSize > 0);
+    invariant(rate > 0);
+    invariant(burstSize > 0);
 
     if (burstSize < toConsume) {
-      return folly::none;
+      return boost::none;
     }
 
     while (toConsume > 0) {
@@ -501,8 +528,8 @@ class BasicTokenBucket {
   BasicTokenBucket(
       double genRate, double burstSize, double zeroTime = 0) noexcept
       : tokenBucket_(zeroTime), rate_(genRate), burstSize_(burstSize) {
-    assert(rate_ > 0);
-    assert(burstSize_ > 0);
+    invariant(rate_ > 0);
+    invariant(burstSize_ > 0);
   }
 
   /**
@@ -541,8 +568,8 @@ class BasicTokenBucket {
       double genRate,
       double burstSize,
       double nowInSeconds = defaultClockNow()) noexcept {
-    assert(genRate > 0);
-    assert(burstSize > 0);
+    invariant(genRate > 0);
+    invariant(burstSize > 0);
     const double availTokens = available(nowInSeconds);
     rate_ = genRate;
     burstSize_ = burstSize;
@@ -612,7 +639,7 @@ class BasicTokenBucket {
    * Reserve tokens and return time to wait for in order for the reservation to
    * be compatible with the bucket configuration.
    */
-  Optional<double> consumeWithBorrowNonBlocking(
+  boost::optional<double> consumeWithBorrowNonBlocking(
       double toConsume, double nowInSeconds = defaultClockNow()) {
     return tokenBucket_.consumeWithBorrowNonBlocking(
         toConsume, rate_, burstSize_, nowInSeconds);
